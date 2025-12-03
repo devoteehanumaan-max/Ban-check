@@ -6,6 +6,7 @@ Helper module for API calls, embed building, and translations
 import json
 import aiohttp
 import os
+import random
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -22,6 +23,46 @@ NOT_BANNED_EMOJI = "<a:emoji_18:1430082305032192000>"
 # Config file path
 CONFIG_FILE = "bot_config.json"
 
+# Mock player names for demo mode
+MOCK_PLAYER_NAMES = [
+    "ProPlayer", "ShadowNinja", "FireStorm", "IceQueen", "DarkKnight",
+    "LightWarrior", "MysticSage", "ThunderBolt", "VenomStrike", "PhoenixRise",
+    "CyberHunter", "GhostWalker", "DragonSlayer", "BlazeMaster", "FrostLord",
+    "SteelTitan", "NightWolf", "SunFlare", "MoonDancer", "StarChaser"
+]
+
+# ============================================================================
+# Mock Data Functions (For when API is down)
+# ============================================================================
+
+def mock_player_status(player_id: str) -> Dict[str, Any]:
+    """
+    Generate mock player status for demo mode
+    
+    Args:
+        player_id: Free Fire player ID
+    
+    Returns:
+        Mock player status dictionary
+    """
+    # Generate random but deterministic ban status based on player ID
+    # This ensures same ID always gets same result
+    random.seed(hash(player_id) % 1000)
+    
+    # 30% chance of being banned
+    is_banned = random.random() < 0.3
+    
+    # Pick a random name
+    player_name = random.choice(MOCK_PLAYER_NAMES)
+    
+    return {
+        'id': player_id,
+        'name': player_name,
+        'banned': is_banned,
+        'mock': True,  # Flag to indicate mock data
+        'timestamp': datetime.utcnow().isoformat()
+    }
+
 # ============================================================================
 # Configuration Functions
 # ============================================================================
@@ -29,9 +70,6 @@ CONFIG_FILE = "bot_config.json"
 def save_bot_config(data: Dict[str, Any]):
     """
     Save configuration to file
-    
-    Args:
-        data: Configuration data to save
     """
     try:
         with open(CONFIG_FILE, 'w') as f:
@@ -44,22 +82,17 @@ def save_bot_config(data: Dict[str, Any]):
 def load_bot_config() -> Dict[str, Any]:
     """
     Load configuration from file
-    
-    Returns:
-        Configuration dictionary
     """
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 return json.load(f)
         else:
-            # Return empty config if file doesn't exist
             return {
                 'allowed_channels': {},
                 'developer': 'Digamber Raj'
             }
     except json.JSONDecodeError:
-        # If file is corrupted, return empty config
         return {
             'allowed_channels': {},
             'developer': 'Digamber Raj'
@@ -74,20 +107,10 @@ def load_bot_config() -> Dict[str, Any]:
 def is_allowed_channel(guild_id: int, channel_id: int, allowed_channels: Dict[int, int]) -> bool:
     """
     Check if a channel is allowed for bot commands
-    
-    Args:
-        guild_id: Discord guild ID
-        channel_id: Discord channel ID
-        allowed_channels: Dictionary of allowed channels
-    
-    Returns:
-        True if channel is allowed, False otherwise
     """
-    # If no restriction for this guild, all channels are allowed
     if guild_id not in allowed_channels:
         return True
     
-    # Check if current channel is the allowed one
     return channel_id == allowed_channels[guild_id]
 
 # ============================================================================
@@ -108,25 +131,41 @@ async def get_player_status(player_id: str, api_url: str) -> Optional[Dict[str, 
     full_url = f"{api_url}{player_id}"
     
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(full_url, timeout=10) as response:
+        # Add timeout and better error handling
+        timeout = aiohttp.ClientTimeout(total=10, connect=5, sock_read=5)
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(full_url) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    return data
+                    data_text = await response.text()
+                    
+                    # Try to parse JSON
+                    try:
+                        data = json.loads(data_text)
+                        
+                        # Validate response format
+                        if isinstance(data, dict) and 'id' in data:
+                            return data
+                        else:
+                            print(f"Invalid API response format for ID {player_id}")
+                            return None
+                            
+                    except json.JSONDecodeError:
+                        print(f"Invalid JSON from API for ID {player_id}")
+                        return None
+                        
                 else:
                     print(f"API returned status {response.status} for ID {player_id}")
                     return None
+                    
     except aiohttp.ClientError as e:
-        print(f"Network error for ID {player_id}: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        print(f"JSON parse error for ID {player_id}: {e}")
+        print(f"Network error for ID {player_id}: {type(e).__name__}")
         return None
     except asyncio.TimeoutError:
         print(f"Timeout error for ID {player_id}")
         return None
     except Exception as e:
-        print(f"Unexpected error for ID {player_id}: {e}")
+        print(f"Unexpected error for ID {player_id}: {type(e).__name__}: {e}")
         return None
 
 # ============================================================================
@@ -149,6 +188,7 @@ def build_embed_response(status_data: Dict[str, Any], lang: str, translations: D
     player_id = status_data.get('id', 'N/A')
     is_banned = status_data.get('banned', False)
     player_name = status_data.get('name', 'Unknown')
+    is_mock = status_data.get('mock', False)
     
     # Get translation strings
     t = translations[lang]
@@ -191,8 +231,11 @@ def build_embed_response(status_data: Dict[str, Any], lang: str, translations: D
         inline=False
     )
     
-    # Add footer with developer credit
-    embed.set_footer(text=f"{footer_text} • Developer: Digamber Raj")
+    # Add mock data indicator if needed
+    if is_mock:
+        embed.set_footer(text=f"{footer_text} • Demo Data • Developer: Digamber Raj")
+    else:
+        embed.set_footer(text=f"{footer_text} • Developer: Digamber Raj")
     
     return embed
 
@@ -203,9 +246,6 @@ def build_embed_response(status_data: Dict[str, Any], lang: str, translations: D
 def load_translations() -> Dict[str, Dict]:
     """
     Load all translation strings
-    
-    Returns:
-        Dictionary with language codes as keys
     """
     return {
         'en': {
@@ -226,7 +266,7 @@ def load_translations() -> Dict[str, Dict]:
             },
             'errors': {
                 'missing_id': 'Please provide a player ID. Usage: `!ID <player_id>`',
-                'invalid_id': 'Player ID must contain only numbers.',
+                'invalid_id': 'Player ID must contain only numbers (max 20 digits).',
                 'api_error': 'Unable to check ban status at this time. Please try again later.',
                 'unexpected': 'An unexpected error occurred. Please try again.'
             },
@@ -254,7 +294,7 @@ def load_translations() -> Dict[str, Dict]:
             },
             'errors': {
                 'missing_id': 'Veuillez fournir un ID joueur. Utilisation : `!ID <player_id>`',
-                'invalid_id': 'L\'ID joueur doit contenir uniquement des chiffres.',
+                'invalid_id': 'L\'ID joueur doit contenir uniquement des chiffres (max 20 chiffres).',
                 'api_error': 'Impossible de vérifier le statut de bannissement pour le moment. Réessayez plus tard.',
                 'unexpected': 'Une erreur inattendue est survenue. Veuillez réessayer.'
             },
@@ -273,23 +313,11 @@ def load_translations() -> Dict[str, Dict]:
 def get_guild_count(bot) -> int:
     """
     Get the number of guilds the bot is in
-    
-    Args:
-        bot: Discord bot instance
-    
-    Returns:
-        Number of guilds
     """
     return len(bot.guilds)
 
 def validate_player_id(player_id: str) -> bool:
     """
     Validate that a player ID contains only digits
-    
-    Args:
-        player_id: Player ID string
-    
-    Returns:
-        True if valid, False otherwise
     """
-    return player_id.isdigit() and len(player_id) <= 20
+    return player_id.isdigit() and len(player_id) <= 20 and len(player_id) >= 6
