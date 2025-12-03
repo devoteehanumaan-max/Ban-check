@@ -9,6 +9,7 @@ import os
 import asyncio
 import aiohttp
 import json
+import sys
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -24,9 +25,8 @@ from utils import (
     validate_player_id,
     BANNED_EMOJI,
     NOT_BANNED_EMOJI,
-    save_config,
-    load_config,
-    is_allowed_channel
+    save_bot_config,
+    load_bot_config
 )
 
 # ============================================================================
@@ -34,9 +34,37 @@ from utils import (
 # ============================================================================
 
 # Discord bot token from environment variable
-BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+
 if not BOT_TOKEN:
-    raise ValueError("DISCORD_BOT_TOKEN environment variable is required")
+    print("❌ ERROR: DISCORD_BOT_TOKEN environment variable is not set!")
+    print("\n🔧 How to fix:")
+    print("1. On Render.com:")
+    print("   - Go to your project dashboard")
+    print("   - Click on 'Environment'")
+    print("   - Add environment variable:")
+    print("     Key: DISCORD_BOT_TOKEN")
+    print("     Value: Your Discord bot token")
+    print("\n2. Locally:")
+    print("   export DISCORD_BOT_TOKEN='your_token_here'")
+    print("   or create .env file with DISCORD_BOT_TOKEN=your_token_here")
+    print("\n3. Get bot token from:")
+    print("   https://discord.com/developers/applications")
+    print("   → Select your bot → Bot → Copy Token")
+    
+    # Don't crash immediately, wait a bit for Render to set env vars
+    print("\n⚠️ Waiting 10 seconds in case environment variable loads late...")
+    import time
+    time.sleep(10)
+    
+    # Try again
+    BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
+    if not BOT_TOKEN:
+        print("\n❌ Still no token found. Please set DISCORD_BOT_TOKEN.")
+        print("💡 For testing, you can use placeholder token but bot won't connect.")
+        BOT_TOKEN = "PLACEHOLDER_TOKEN_NO_CONNECTION"
+        print(f"Using placeholder: {BOT_TOKEN}")
+        print("Bot will start but won't connect to Discord. Set real token to fix.")
 
 # Bot prefix
 COMMAND_PREFIX = "!"
@@ -63,7 +91,8 @@ def home():
         "status": "online",
         "service": "FreeFire Ban Checker",
         "developer": "Digamber Raj",
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "note": "Bot is running"
     })
 
 @web_app.route('/health')
@@ -71,9 +100,43 @@ def health_check():
     """Simple health endpoint for uptime monitoring"""
     return "OK", 200
 
+@web_app.route('/setup')
+def setup_guide():
+    """Setup guide endpoint"""
+    return """
+    <h1>Free Fire Ban Checker Bot Setup</h1>
+    <p><strong>Developer:</strong> Digamber Raj</p>
+    
+    <h2>Setup Steps:</h2>
+    <ol>
+        <li>Get bot token from <a href="https://discord.com/developers/applications">Discord Developer Portal</a></li>
+        <li>Set environment variable: <code>DISCORD_BOT_TOKEN=your_token_here</code></li>
+        <li>Restart the application</li>
+        <li>Invite bot to your server</li>
+    </ol>
+    
+    <h2>Environment Variable Help:</h2>
+    <p><strong>On Render.com:</strong></p>
+    <ul>
+        <li>Go to your project → Environment</li>
+        <li>Add new environment variable</li>
+        <li>Key: DISCORD_BOT_TOKEN</li>
+        <li>Value: Your bot token</li>
+        <li>Click "Save Changes"</li>
+        <li>Redeploy if needed</li>
+    </ul>
+    
+    <p><strong>Command to check if variable is set:</strong></p>
+    <pre>echo $DISCORD_BOT_TOKEN</pre>
+    """
+
 def run_flask():
     """Run Flask in a separate thread"""
-    web_app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        web_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
+    except Exception as e:
+        print(f"Flask error: {e}")
 
 # ============================================================================
 # Discord Bot Setup
@@ -105,28 +168,30 @@ translations = load_translations()
 # Configuration Management
 # ============================================================================
 
-def load_bot_config():
-    """Load bot configuration from file"""
+def load_allowed_channels():
+    """Load allowed channels from config file"""
+    global allowed_channels
     try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r') as f:
-                config = json.load(f)
-                return config.get('allowed_channels', {})
+        config = load_bot_config()
+        if 'allowed_channels' in config:
+            allowed_channels = config['allowed_channels']
+            print(f"📁 Loaded {len(allowed_channels)} channel restrictions from config")
     except Exception as e:
-        print(f"Error loading config: {e}")
-    return {}
+        print(f"⚠️ Error loading config: {e}")
+        allowed_channels = {}
 
-def save_bot_config():
-    """Save bot configuration to file"""
+def save_allowed_channels():
+    """Save allowed channels to config file"""
     try:
         config = {
             'allowed_channels': allowed_channels,
-            'updated_at': datetime.utcnow().isoformat()
+            'updated_at': datetime.utcnow().isoformat(),
+            'developer': 'Digamber Raj'
         }
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(config, f, indent=2)
+        save_bot_config(config)
+        print(f"💾 Saved {len(allowed_channels)} channel restrictions")
     except Exception as e:
-        print(f"Error saving config: {e}")
+        print(f"⚠️ Error saving config: {e}")
 
 # ============================================================================
 # Permission Checks
@@ -145,85 +210,6 @@ def check_admin_permission(ctx):
     return False
 
 # ============================================================================
-# Bot Events
-# ============================================================================
-
-@bot.event
-async def on_ready():
-    """Called when the bot is ready and connected"""
-    print(f"✅ Bot is online as {bot.user.name}")
-    print(f"✅ Connected to {len(bot.guilds)} servers")
-    print(f"✅ Developer: Digamber Raj")
-    
-    # Load saved configuration
-    global allowed_channels
-    saved_channels = load_bot_config()
-    allowed_channels.update(saved_channels)
-    print(f"✅ Loaded {len(allowed_channels)} channel restrictions")
-    
-    # Set bot status
-    activity = discord.Activity(
-        type=discord.ActivityType.watching,
-        name="!ID <player_id>"
-    )
-    await bot.change_presence(activity=activity)
-
-@bot.event
-async def on_guild_join(guild):
-    """When bot joins a new server"""
-    print(f"➕ Joined new server: {guild.name} (ID: {guild.id})")
-    
-    # Send welcome message to system channel or first text channel
-    try:
-        channel = guild.system_channel
-        if channel and channel.permissions_for(guild.me).send_messages:
-            welcome_embed = discord.Embed(
-                title="Free Fire Ban Checker",
-                description=(
-                    "Thanks for adding me to your server!\n\n"
-                    "**Available Commands:**\n"
-                    "`!ID <player_id>` - Check ban status\n"
-                    "`!setchannel` - Set restricted channel (Admin only)\n"
-                    "`!lang en/fr` - Set your language\n"
-                    "`!guilds` - Show server count\n"
-                    "`!helpchannel` - Show current channel restriction\n"
-                ),
-                color=0x5865F2,
-                timestamp=datetime.utcnow()
-            )
-            welcome_embed.set_footer(text="Developer: Digamber Raj")
-            await channel.send(embed=welcome_embed)
-    except Exception as e:
-        print(f"Couldn't send welcome message: {e}")
-
-@bot.event
-async def on_guild_remove(guild):
-    """When bot is removed from a server"""
-    print(f"➖ Removed from server: {guild.name} (ID: {guild.id})")
-    
-    # Clean up channel restriction for this guild
-    if guild.id in allowed_channels:
-        del allowed_channels[guild.id]
-        save_bot_config()
-
-@bot.event
-async def on_command_error(ctx, error):
-    """Handle command errors gracefully"""
-    if isinstance(error, commands.CommandNotFound):
-        # Silently ignore unknown commands
-        return
-    elif isinstance(error, commands.MissingRequiredArgument):
-        lang = user_languages.get(ctx.author.id, DEFAULT_LANG)
-        msg = translations[lang]['errors']['missing_id']
-        await ctx.send(f"❌ {msg}")
-    elif isinstance(error, commands.CheckFailure):
-        # Permission error for setchannel
-        await ctx.send("❌ You need **Administrator** permissions to use this command.")
-    else:
-        # Log other errors but don't spam the channel
-        print(f"Command error: {error}")
-
-# ============================================================================
 # Channel Restriction Check
 # ============================================================================
 
@@ -232,6 +218,10 @@ def check_channel_restriction():
     async def predicate(ctx):
         # Always allow commands in DMs
         if isinstance(ctx.channel, discord.DMChannel):
+            return True
+        
+        # If no guild (shouldn't happen)
+        if not ctx.guild:
             return True
         
         guild_id = ctx.guild.id
@@ -259,6 +249,99 @@ def check_channel_restriction():
         return False
     
     return commands.check(predicate)
+
+# ============================================================================
+# Bot Events
+# ============================================================================
+
+@bot.event
+async def on_ready():
+    """Called when the bot is ready and connected"""
+    print(f"✅ Bot is online as {bot.user.name}")
+    print(f"✅ Connected to {len(bot.guilds)} servers")
+    print(f"✅ Developer: Digamber Raj")
+    print(f"✅ Prefix: {COMMAND_PREFIX}")
+    
+    # Load saved configuration
+    load_allowed_channels()
+    
+    # Set bot status
+    activity = discord.Activity(
+        type=discord.ActivityType.watching,
+        name="!ID <player_id>"
+    )
+    try:
+        await bot.change_presence(activity=activity)
+    except:
+        pass
+
+@bot.event
+async def on_guild_join(guild):
+    """When bot joins a new server"""
+    print(f"➕ Joined new server: {guild.name} (ID: {guild.id})")
+    
+    # Send welcome message to system channel or first text channel
+    try:
+        channel = guild.system_channel
+        if not channel or not channel.permissions_for(guild.me).send_messages:
+            # Try to find first text channel with send permissions
+            for ch in guild.text_channels:
+                if ch.permissions_for(guild.me).send_messages:
+                    channel = ch
+                    break
+        
+        if channel and channel.permissions_for(guild.me).send_messages:
+            welcome_embed = discord.Embed(
+                title="🤖 Free Fire Ban Checker",
+                description=(
+                    "Thanks for adding me to your server!\n\n"
+                    "**Main Commands:**\n"
+                    "`!ID <player_id>` - Check ban status\n"
+                    "`!lang en/fr` - Set your language\n"
+                    "`!guilds` - Show server count\n"
+                    "`!botinfo` - Show all commands\n\n"
+                    "**Admin Commands:**\n"
+                    "`!setchannel` - Restrict bot to this channel\n"
+                    "`!removechannel` - Remove restriction\n"
+                    "`!helpchannel` - Show current restriction\n"
+                ),
+                color=0x5865F2,
+                timestamp=datetime.utcnow()
+            )
+            welcome_embed.set_footer(text="Developer: Digamber Raj")
+            await channel.send(embed=welcome_embed)
+    except Exception as e:
+        print(f"⚠️ Couldn't send welcome message: {e}")
+
+@bot.event
+async def on_guild_remove(guild):
+    """When bot is removed from a server"""
+    print(f"➖ Removed from server: {guild.name} (ID: {guild.id})")
+    
+    # Clean up channel restriction for this guild
+    if guild.id in allowed_channels:
+        del allowed_channels[guild.id]
+        save_allowed_channels()
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Handle command errors gracefully"""
+    if isinstance(error, commands.CommandNotFound):
+        return
+    elif isinstance(error, commands.MissingRequiredArgument):
+        lang = user_languages.get(ctx.author.id, DEFAULT_LANG)
+        msg = translations[lang]['errors']['missing_id']
+        await ctx.send(f"❌ {msg}")
+    elif isinstance(error, commands.CheckFailure):
+        # Check if it's channel restriction error
+        if "predicate" in str(error):
+            return  # Already handled by decorator
+        # Permission error for setchannel
+        await ctx.send("❌ You need **Administrator** permissions to use this command.")
+    elif isinstance(error, commands.BotMissingPermissions):
+        await ctx.send("❌ I don't have permission to do that. Please check my role permissions.")
+    else:
+        print(f"⚠️ Command error: {type(error).__name__}: {error}")
 
 # ============================================================================
 # Bot Commands
@@ -308,7 +391,6 @@ async def check_ban(ctx, player_id: str):
                 await ctx.send(file=gif_file, embed=embed)
             else:
                 # Fallback: send just the embed
-                print(f"Warning: GIF file not found at {gif_path}")
                 await ctx.send(embed=embed)
                 
         except Exception as e:
@@ -318,11 +400,17 @@ async def check_ban(ctx, player_id: str):
 
 @bot.command(name='lang')
 @check_channel_restriction()
-async def set_language(ctx, language: str):
+async def set_language(ctx, language: str = None):
     """
     Set your preferred language (en/fr)
     Usage: !lang en  OR  !lang fr
     """
+    if language is None:
+        current_lang = user_languages.get(ctx.author.id, DEFAULT_LANG)
+        await ctx.send(f"ℹ️ Your current language is: **{current_lang}**\n"
+                      f"Use `!lang en` or `!lang fr` to change.")
+        return
+    
     lang = language.lower().strip()
     
     if lang not in ['en', 'fr']:
@@ -375,7 +463,7 @@ async def set_restricted_channel(ctx):
     allowed_channels[guild_id] = channel_id
     
     # Save configuration
-    save_bot_config()
+    save_allowed_channels()
     
     # Send confirmation
     embed = discord.Embed(
@@ -403,7 +491,7 @@ async def remove_channel_restriction(ctx):
     
     if guild_id in allowed_channels:
         del allowed_channels[guild_id]
-        save_bot_config()
+        save_allowed_channels()
         
         embed = discord.Embed(
             title="✅ Channel Restriction Removed",
@@ -515,25 +603,53 @@ async def bot_information(ctx):
     embed.set_footer(text="Free Fire Ban Checker Bot")
     await ctx.send(embed=embed)
 
+@bot.command(name='ping')
+async def ping_command(ctx):
+    """Check bot latency"""
+    latency = round(bot.latency * 1000)  # Convert to ms
+    await ctx.send(f"🏓 Pong! Latency: **{latency}ms**")
+
 # ============================================================================
 # Startup Logic
 # ============================================================================
 
 async def start_bot():
     """Start the Discord bot"""
+    print("🚀 Starting Free Fire Ban Checker Bot...")
+    print(f"👨‍💻 Developer: Digamber Raj")
+    print(f"🔧 Bot Token Present: {'Yes' if BOT_TOKEN and BOT_TOKEN != 'PLACEHOLDER_TOKEN_NO_CONNECTION' else 'No (using placeholder)'}")
+    
+    if BOT_TOKEN == "PLACEHOLDER_TOKEN_NO_CONNECTION":
+        print("⚠️ WARNING: Using placeholder token. Bot will NOT connect to Discord.")
+        print("⚠️ Please set DISCORD_BOT_TOKEN environment variable.")
+    
     # Start Flask server in background for keep-alive
     import threading
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("🌐 Flask keep-alive server started on port 8080")
+    print("🌐 Flask keep-alive server started")
     
-    # Start Discord bot
-    await bot.start(BOT_TOKEN)
+    try:
+        # Start Discord bot
+        await bot.start(BOT_TOKEN)
+    except discord.errors.LoginFailure:
+        print("❌ FAILED TO LOGIN: Invalid Discord bot token!")
+        print("💡 Please check your DISCORD_BOT_TOKEN environment variable.")
+        print("💡 Get token from: https://discord.com/developers/applications")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Bot startup error: {e}")
+        sys.exit(1)
 
 def main():
     """Main entry point"""
-    # Run the bot
-    asyncio.run(start_bot())
+    try:
+        asyncio.run(start_bot())
+    except KeyboardInterrupt:
+        print("\n👋 Bot shutting down...")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
