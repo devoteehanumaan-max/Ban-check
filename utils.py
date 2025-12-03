@@ -26,7 +26,7 @@ CONFIG_FILE = "bot_config.json"
 # Configuration Functions
 # ============================================================================
 
-def save_config(data: Dict[str, Any]):
+def save_bot_config(data: Dict[str, Any]):
     """
     Save configuration to file
     
@@ -36,10 +36,12 @@ def save_config(data: Dict[str, Any]):
     try:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(data, f, indent=2)
+        return True
     except Exception as e:
         print(f"Error saving config: {e}")
+        return False
 
-def load_config() -> Dict[str, Any]:
+def load_bot_config() -> Dict[str, Any]:
     """
     Load configuration from file
     
@@ -50,9 +52,24 @@ def load_config() -> Dict[str, Any]:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 return json.load(f)
+        else:
+            # Return empty config if file doesn't exist
+            return {
+                'allowed_channels': {},
+                'developer': 'Digamber Raj'
+            }
+    except json.JSONDecodeError:
+        # If file is corrupted, return empty config
+        return {
+            'allowed_channels': {},
+            'developer': 'Digamber Raj'
+        }
     except Exception as e:
         print(f"Error loading config: {e}")
-    return {}
+        return {
+            'allowed_channels': {},
+            'developer': 'Digamber Raj'
+        }
 
 def is_allowed_channel(guild_id: int, channel_id: int, allowed_channels: Dict[int, int]) -> bool:
     """
@@ -97,16 +114,19 @@ async def get_player_status(player_id: str, api_url: str) -> Optional[Dict[str, 
                     data = await response.json()
                     return data
                 else:
-                    print(f"API returned status {response.status}")
+                    print(f"API returned status {response.status} for ID {player_id}")
                     return None
     except aiohttp.ClientError as e:
-        print(f"Network error: {e}")
+        print(f"Network error for ID {player_id}: {e}")
         return None
     except json.JSONDecodeError as e:
-        print(f"JSON parse error: {e}")
+        print(f"JSON parse error for ID {player_id}: {e}")
+        return None
+    except asyncio.TimeoutError:
+        print(f"Timeout error for ID {player_id}")
         return None
     except Exception as e:
-        print(f"Unexpected error in API call: {e}")
+        print(f"Unexpected error for ID {player_id}: {e}")
         return None
 
 # ============================================================================
@@ -272,4 +292,4 @@ def validate_player_id(player_id: str) -> bool:
     Returns:
         True if valid, False otherwise
     """
-    return player_id.isdigit()
+    return player_id.isdigit() and len(player_id) <= 20
