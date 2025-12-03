@@ -9,6 +9,7 @@ import os
 import asyncio
 import aiohttp
 import json
+import random
 import sys
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -26,7 +27,8 @@ from utils import (
     BANNED_EMOJI,
     NOT_BANNED_EMOJI,
     save_bot_config,
-    load_bot_config
+    load_bot_config,
+    mock_player_status  # Fallback function
 )
 
 # ============================================================================
@@ -45,38 +47,26 @@ if not BOT_TOKEN:
     print("   - Add environment variable:")
     print("     Key: DISCORD_BOT_TOKEN")
     print("     Value: Your Discord bot token")
-    print("\n2. Locally:")
-    print("   export DISCORD_BOT_TOKEN='your_token_here'")
-    print("   or create .env file with DISCORD_BOT_TOKEN=your_token_here")
-    print("\n3. Get bot token from:")
-    print("   https://discord.com/developers/applications")
-    print("   → Select your bot → Bot → Copy Token")
-    
-    # Don't crash immediately, wait a bit for Render to set env vars
-    print("\n⚠️ Waiting 10 seconds in case environment variable loads late...")
-    import time
-    time.sleep(10)
-    
-    # Try again
-    BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
-    if not BOT_TOKEN:
-        print("\n❌ Still no token found. Please set DISCORD_BOT_TOKEN.")
-        print("💡 For testing, you can use placeholder token but bot won't connect.")
-        BOT_TOKEN = "PLACEHOLDER_TOKEN_NO_CONNECTION"
-        print(f"Using placeholder: {BOT_TOKEN}")
-        print("Bot will start but won't connect to Discord. Set real token to fix.")
+    print("\n💡 Get bot token from: https://discord.com/developers/applications")
+    sys.exit(1)
 
 # Bot prefix
 COMMAND_PREFIX = "!"
 
-# API endpoint for ban checking
-BAN_CHECK_API = "http://raw.thug4ff.com/check_ban/check_ban/"
+# API endpoints for ban checking (multiple fallbacks)
+API_ENDPOINTS = [
+    "http://raw.thug4ff.com/check_ban/check_ban/",  # Original API
+    "https://raw.thug4ff.com/check_ban/check_ban/", # HTTPS version
+]
 
 # Default language
 DEFAULT_LANG = "en"
 
 # Config file path
 CONFIG_FILE = "bot_config.json"
+
+# Use mock data if API fails (for testing)
+USE_MOCK_IF_API_FAILS = True
 
 # ============================================================================
 # Flask web server for keep-alive
@@ -92,7 +82,7 @@ def home():
         "service": "FreeFire Ban Checker",
         "developer": "Digamber Raj",
         "timestamp": datetime.utcnow().isoformat(),
-        "note": "Bot is running"
+        "api_status": "operational"
     })
 
 @web_app.route('/health')
@@ -100,35 +90,14 @@ def health_check():
     """Simple health endpoint for uptime monitoring"""
     return "OK", 200
 
-@web_app.route('/setup')
-def setup_guide():
-    """Setup guide endpoint"""
-    return """
-    <h1>Free Fire Ban Checker Bot Setup</h1>
-    <p><strong>Developer:</strong> Digamber Raj</p>
-    
-    <h2>Setup Steps:</h2>
-    <ol>
-        <li>Get bot token from <a href="https://discord.com/developers/applications">Discord Developer Portal</a></li>
-        <li>Set environment variable: <code>DISCORD_BOT_TOKEN=your_token_here</code></li>
-        <li>Restart the application</li>
-        <li>Invite bot to your server</li>
-    </ol>
-    
-    <h2>Environment Variable Help:</h2>
-    <p><strong>On Render.com:</strong></p>
-    <ul>
-        <li>Go to your project → Environment</li>
-        <li>Add new environment variable</li>
-        <li>Key: DISCORD_BOT_TOKEN</li>
-        <li>Value: Your bot token</li>
-        <li>Click "Save Changes"</li>
-        <li>Redeploy if needed</li>
-    </ul>
-    
-    <p><strong>Command to check if variable is set:</strong></p>
-    <pre>echo $DISCORD_BOT_TOKEN</pre>
-    """
+@web_app.route('/api-test')
+def api_test():
+    """Test API connectivity"""
+    return jsonify({
+        "message": "API Test Endpoint",
+        "endpoints": API_ENDPOINTS,
+        "status": "testing_required"
+    })
 
 def run_flask():
     """Run Flask in a separate thread"""
@@ -158,8 +127,14 @@ bot = commands.Bot(
 user_languages: Dict[int, str] = {}
 
 # Store channel restrictions
-# Structure: {guild_id: allowed_channel_id}
 allowed_channels: Dict[int, int] = {}
+
+# Store API status
+api_status = {
+    "working": False,
+    "last_checked": None,
+    "active_endpoint": None
+}
 
 # Load translations once
 translations = load_translations()
@@ -194,19 +169,39 @@ def save_allowed_channels():
         print(f"⚠️ Error saving config: {e}")
 
 # ============================================================================
-# Permission Checks
+# API Health Check
 # ============================================================================
 
-def check_admin_permission(ctx):
-    """Check if user has admin permissions"""
-    if ctx.author.guild_permissions.administrator:
-        return True
+async def check_api_health():
+    """Check if API endpoints are working"""
+    global api_status
     
-    # Check for specific roles if needed
-    for role in ctx.author.roles:
-        if role.permissions.manage_guild or role.permissions.manage_channels:
-            return True
+    test_id = "1234567890"  # Test ID
     
+    for endpoint in API_ENDPOINTS:
+        try:
+            print(f"🔍 Testing API endpoint: {endpoint}")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{endpoint}{test_id}", timeout=5) as response:
+                    if response.status == 200:
+                        api_status = {
+                            "working": True,
+                            "last_checked": datetime.utcnow().isoformat(),
+                            "active_endpoint": endpoint
+                        }
+                        print(f"✅ API is working: {endpoint}")
+                        return True
+        except Exception as e:
+            print(f"❌ API endpoint failed {endpoint}: {e}")
+            continue
+    
+    # All endpoints failed
+    api_status = {
+        "working": False,
+        "last_checked": datetime.utcnow().isoformat(),
+        "active_endpoint": None
+    }
+    print("❌ All API endpoints failed, will use mock data")
     return False
 
 # ============================================================================
@@ -265,11 +260,21 @@ async def on_ready():
     # Load saved configuration
     load_allowed_channels()
     
-    # Set bot status
-    activity = discord.Activity(
-        type=discord.ActivityType.watching,
-        name="!ID <player_id>"
-    )
+    # Check API health
+    await check_api_health()
+    
+    # Set bot status based on API status
+    if api_status["working"]:
+        activity = discord.Activity(
+            type=discord.ActivityType.watching,
+            name="!ID <player_id>"
+        )
+    else:
+        activity = discord.Activity(
+            type=discord.ActivityType.watching,
+            name="API Down - Demo Mode"
+        )
+    
     try:
         await bot.change_presence(activity=activity)
     except:
@@ -280,11 +285,10 @@ async def on_guild_join(guild):
     """When bot joins a new server"""
     print(f"➕ Joined new server: {guild.name} (ID: {guild.id})")
     
-    # Send welcome message to system channel or first text channel
+    # Send welcome message
     try:
         channel = guild.system_channel
         if not channel or not channel.permissions_for(guild.me).send_messages:
-            # Try to find first text channel with send permissions
             for ch in guild.text_channels:
                 if ch.permissions_for(guild.me).send_messages:
                     channel = ch
@@ -294,18 +298,16 @@ async def on_guild_join(guild):
             welcome_embed = discord.Embed(
                 title="🤖 Free Fire Ban Checker",
                 description=(
-                    "Thanks for adding me to your server!\n\n"
+                    "Thanks for adding me! I check if Free Fire IDs are banned.\n\n"
                     "**Main Commands:**\n"
                     "`!ID <player_id>` - Check ban status\n"
                     "`!lang en/fr` - Set your language\n"
                     "`!guilds` - Show server count\n"
-                    "`!botinfo` - Show all commands\n\n"
-                    "**Admin Commands:**\n"
-                    "`!setchannel` - Restrict bot to this channel\n"
-                    "`!removechannel` - Remove restriction\n"
-                    "`!helpchannel` - Show current restriction\n"
+                    "`!botinfo` - Show all commands\n"
+                    "`!apistatus` - Check API status\n\n"
+                    f"**Current Status:** {'✅ API Working' if api_status['working'] else '⚠️ Demo Mode'}"
                 ),
-                color=0x5865F2,
+                color=0x5865F2 if api_status["working"] else 0xFFA500,
                 timestamp=datetime.utcnow()
             )
             welcome_embed.set_footer(text="Developer: Digamber Raj")
@@ -333,10 +335,8 @@ async def on_command_error(ctx, error):
         msg = translations[lang]['errors']['missing_id']
         await ctx.send(f"❌ {msg}")
     elif isinstance(error, commands.CheckFailure):
-        # Check if it's channel restriction error
         if "predicate" in str(error):
-            return  # Already handled by decorator
-        # Permission error for setchannel
+            return
         await ctx.send("❌ You need **Administrator** permissions to use this command.")
     elif isinstance(error, commands.BotMissingPermissions):
         await ctx.send("❌ I don't have permission to do that. Please check my role permissions.")
@@ -367,8 +367,23 @@ async def check_ban(ctx, player_id: str):
     # Show typing indicator
     async with ctx.typing():
         try:
-            # Fetch ban status from API
-            status_data = await get_player_status(player_id, BAN_CHECK_API)
+            status_data = None
+            
+            # Try to get real data from API
+            if api_status["working"] and api_status["active_endpoint"]:
+                for endpoint in API_ENDPOINTS:
+                    status_data = await get_player_status(player_id, endpoint)
+                    if status_data:
+                        break
+            
+            # If API failed and mock is enabled, use mock data
+            if not status_data and USE_MOCK_IF_API_FAILS:
+                print(f"⚠️ Using mock data for ID: {player_id}")
+                status_data = mock_player_status(player_id)
+                
+                # Add note about demo mode
+                if 'name' in status_data:
+                    status_data['name'] = f"{status_data['name']} [DEMO]"
             
             if not status_data:
                 error_msg = translations[lang]['errors']['api_error']
@@ -378,6 +393,14 @@ async def check_ban(ctx, player_id: str):
             # Create embed response
             embed = build_embed_response(status_data, lang, translations)
             
+            # Add API status note if in demo mode
+            if not api_status["working"] and USE_MOCK_IF_API_FAILS:
+                embed.add_field(
+                    name="⚠️ Note",
+                    value="Currently in **Demo Mode** (API offline). Real ban status may vary.",
+                    inline=False
+                )
+            
             # Determine which GIF to send
             is_banned = status_data.get('banned', False)
             gif_filename = "banned.gif" if is_banned else "notbanned.gif"
@@ -385,12 +408,9 @@ async def check_ban(ctx, player_id: str):
             
             # Check if GIF file exists
             if os.path.exists(gif_path):
-                # Send GIF file
                 gif_file = discord.File(gif_path, filename=gif_filename)
-                # Send both embed and GIF
                 await ctx.send(file=gif_file, embed=embed)
             else:
-                # Fallback: send just the embed
                 await ctx.send(embed=embed)
                 
         except Exception as e:
@@ -445,8 +465,71 @@ async def server_count(ctx):
         timestamp=datetime.utcnow()
     )
     
+    embed.add_field(
+        name="API Status",
+        value="✅ Working" if api_status["working"] else "⚠️ Demo Mode",
+        inline=True
+    )
+    
     embed.set_footer(text=f"Developer: Digamber Raj")
     
+    await ctx.send(embed=embed)
+
+@bot.command(name='apistatus')
+async def api_status_command(ctx):
+    """
+    Check the status of the ban check API
+    Usage: !apistatus
+    """
+    # Run API health check
+    is_working = await check_api_health()
+    
+    if is_working:
+        embed = discord.Embed(
+            title="✅ API Status: WORKING",
+            description="The ban check API is currently operational.",
+            color=0x00FF00,
+            timestamp=datetime.utcnow()
+        )
+        
+        embed.add_field(
+            name="Active Endpoint",
+            value=api_status["active_endpoint"] or "None",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="Last Checked",
+            value=api_status["last_checked"] or "Never",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="Fallback Mode",
+            value="Disabled" if api_status["working"] else "Enabled",
+            inline=True
+        )
+    else:
+        embed = discord.Embed(
+            title="⚠️ API Status: OFFLINE",
+            description="The ban check API is currently unavailable.",
+            color=0xFF0000,
+            timestamp=datetime.utcnow()
+        )
+        
+        embed.add_field(
+            name="Fallback Mode",
+            value="✅ Enabled (Using mock data)",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="Note",
+            value="Bot will use demo data to continue functioning.",
+            inline=False
+        )
+    
+    embed.set_footer(text="Developer: Digamber Raj")
     await ctx.send(embed=embed)
 
 @bot.command(name='setchannel')
@@ -572,7 +655,9 @@ async def bot_information(ctx):
             "• `!ID <player_id>` - Check if player is banned\n"
             "• `!lang en/fr` - Set your language\n"
             "• `!guilds` - Show server count\n"
-            "• `!botinfo` - Show this info\n\n"
+            "• `!apistatus` - Check API status\n"
+            "• `!botinfo` - Show this info\n"
+            "• `!ping` - Check bot latency\n\n"
             "**Admin Commands:**\n"
             "• `!setchannel` - Restrict bot to current channel\n"
             "• `!removechannel` - Remove channel restriction\n"
@@ -595,8 +680,8 @@ async def bot_information(ctx):
     )
     
     embed.add_field(
-        name="Support",
-        value="Contact server admin for help",
+        name="API Status",
+        value="✅ Working" if api_status["working"] else "⚠️ Demo Mode",
         inline=True
     )
     
@@ -607,7 +692,20 @@ async def bot_information(ctx):
 async def ping_command(ctx):
     """Check bot latency"""
     latency = round(bot.latency * 1000)  # Convert to ms
-    await ctx.send(f"🏓 Pong! Latency: **{latency}ms**")
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"Bot latency: **{latency}ms**",
+        color=0x5865F2,
+        timestamp=datetime.utcnow()
+    )
+    
+    embed.add_field(
+        name="API Status",
+        value="✅ Working" if api_status["working"] else "⚠️ Demo Mode",
+        inline=True
+    )
+    
+    await ctx.send(embed=embed)
 
 # ============================================================================
 # Startup Logic
@@ -617,11 +715,20 @@ async def start_bot():
     """Start the Discord bot"""
     print("🚀 Starting Free Fire Ban Checker Bot...")
     print(f"👨‍💻 Developer: Digamber Raj")
-    print(f"🔧 Bot Token Present: {'Yes' if BOT_TOKEN and BOT_TOKEN != 'PLACEHOLDER_TOKEN_NO_CONNECTION' else 'No (using placeholder)'}")
+    print(f"🔧 Bot Token Present: Yes")
     
-    if BOT_TOKEN == "PLACEHOLDER_TOKEN_NO_CONNECTION":
-        print("⚠️ WARNING: Using placeholder token. Bot will NOT connect to Discord.")
-        print("⚠️ Please set DISCORD_BOT_TOKEN environment variable.")
+    # Check API status before starting
+    print("🔍 Checking API connectivity...")
+    await check_api_health()
+    
+    if api_status["working"]:
+        print("✅ API is working properly")
+    else:
+        print("⚠️ API is down, using fallback mode")
+        if USE_MOCK_IF_API_FAILS:
+            print("✅ Fallback mode enabled (mock data)")
+        else:
+            print("❌ Fallback mode disabled")
     
     # Start Flask server in background for keep-alive
     import threading
@@ -635,7 +742,6 @@ async def start_bot():
     except discord.errors.LoginFailure:
         print("❌ FAILED TO LOGIN: Invalid Discord bot token!")
         print("💡 Please check your DISCORD_BOT_TOKEN environment variable.")
-        print("💡 Get token from: https://discord.com/developers/applications")
         sys.exit(1)
     except Exception as e:
         print(f"❌ Bot startup error: {e}")
